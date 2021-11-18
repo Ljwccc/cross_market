@@ -1,0 +1,4 @@
+__pycache__
+baseline_outputs/sample_run/t1/*
+baseline_outputs/sample_run/t2/*
+baseline_outputs/*.zip
