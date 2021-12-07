@@ -27,7 +27,7 @@ def create_arg_parser():
     parser.add_argument('--src_markets', help='specify none ("none") or a few source markets ("-" seperated) to augment the data for training', type=str, default='s1-s2') 
     
     parser.add_argument('--tgt_market_valid', help='specify validation run file for target market', type=str, default='DATA/t1/valid_run.tsv')
-    parser.add_argument('--tgt_market_test', help='specify test run file for target market', type=str, default='DATA/t1/test_run.tsv') 
+    parser.add_argument('--tgt_market_test', help='specify test run file for target market', type=str, default='DATA/t1/test_run.tsv')
     
     parser.add_argument('--exp_name', help='name the experiment',type=str, default='baseline_toy')
     
@@ -35,12 +35,12 @@ def create_arg_parser():
     parser.add_argument('--train_data_file', help='the file name of the train data',type=str, default='train_5core.tsv') #'train.tsv' for the original data loading
     
     # MODEL arguments
-    parser.add_argument('--num_epoch', type=int, default=50, help='number of epoches')
+    parser.add_argument('--num_epoch', type=int, default=100, help='number of epoches')
     parser.add_argument('--batch_size', type=int, default=1024, help='batch size')
-    parser.add_argument('--lr', type=float, default=0.001, help='learning rate')
+    parser.add_argument('--lr', type=float, default=0.005, help='learning rate')
     parser.add_argument('--l2_reg', type=float, default=1e-07, help='l2 regularization')
     parser.add_argument('--latent_dim', type=int, default=128, help='latent dimensions')
-    parser.add_argument('--num_negative', type=int, default=4, help='num of negative samples during training')
+    parser.add_argument('--num_negative', type=int, default=8, help='num of negative samples during training')
     
     parser.add_argument('--cuda', action='store_true', help='use of cuda')
     parser.add_argument('--seed', type=int, default=42, help='manual seed init')
@@ -65,7 +65,12 @@ def main():
     train_file_names = args.train_data_file # 'train_5core.tsv', 'train.tsv' for the original data loading
     
     tgt_train_data_dir = os.path.join(args.data_dir, args.tgt_market, train_file_names)
+    tgt_val_data_dir = os.path.join(args.data_dir, args.tgt_market, 'valid_qrel.tsv')
+
     tgt_train_ratings = pd.read_csv(tgt_train_data_dir, sep='\t')  # train_5core.tsv
+    tgt_val_ratings = pd.read_csv(tgt_val_data_dir, sep='\t')  # train_5core.tsv
+
+    # tgt_train_ratings = pd.concat([tgt_train_ratings, tgt_val_ratings],ignore_index=True)
 
     print(f'Loading target market {args.tgt_market}: {tgt_train_data_dir}')
     tgt_task_generator = TaskGenerator(tgt_train_ratings, my_id_bank)     # tgt_train_ratings当作参数传进去也会被改变
@@ -102,7 +107,7 @@ def main():
     
 
     # NGCF模型的邻接矩阵
-    _, norm_adj, _ = create_adj_mat(my_id_bank, tgt_train_ratings)
+    _, norm_adj, _ = get_adj_mat(my_id_bank, tgt_train_ratings, args.tgt_market)
     ############
     ## Model
     ############

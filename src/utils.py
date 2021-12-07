@@ -135,7 +135,23 @@ def conver_data(valid_run_df, my_id_bank):
 
     return valid_run_user[['userId','user_sort_item']]
 
-        
+
+# 获取邻接矩阵
+def get_adj_mat(id_bank, u_i_pair, tgt_market):
+    path = f'./baseline_outputs/mat_dir/{tgt_market}'
+    try:
+        t1 = time()
+        adj_mat = sp.load_npz(path + '/s_adj_mat.npz')
+        norm_adj_mat = sp.load_npz(path + '/s_norm_adj_mat.npz')
+        mean_adj_mat = sp.load_npz(path + '/s_mean_adj_mat.npz')
+        print('already load adj matrix', adj_mat.shape, time() - t1)
+
+    except Exception:
+        adj_mat, norm_adj_mat, mean_adj_mat = create_adj_mat(id_bank, u_i_pair)
+        sp.save_npz(path + '/s_adj_mat.npz', adj_mat)
+        sp.save_npz(path + '/s_norm_adj_mat.npz', norm_adj_mat)
+        sp.save_npz(path + '/s_mean_adj_mat.npz', mean_adj_mat)
+    return adj_mat, norm_adj_mat, mean_adj_mat
 # NGCF的邻接矩阵
 def create_adj_mat(id_bank, u_i_pair):
     t1 = time.time()
@@ -144,12 +160,14 @@ def create_adj_mat(id_bank, u_i_pair):
     print('n_users:',n_users)
     print('n_items:',n_items)
 
-    adj_mat = sp.dok_matrix((n_users + n_items, n_users + n_items), dtype=np.float32)  
+    adj_mat = sp.dok_matrix((n_users + n_items, n_users + n_items), dtype=np.float32)
     adj_mat = adj_mat.tolil()                                      # 邻接矩阵
 
 
     R = sp.dok_matrix((n_users, n_items), dtype=np.float32)        # 邻接矩阵子矩阵，用来填充邻接矩阵，需要手动进行填充
+
     # 使用user-item pair填充R
+    # 因为u_i_pair之前做过id2index的操作，在这里就不用在做了
     # u_i_pair['userId'] = u_i_pair['userId'].parallel_apply(lambda x:id_bank.query_user_index(x))  # id2index
     # u_i_pair['itemId'] = u_i_pair['itemId'].parallel_apply(lambda x:id_bank.query_item_index(x))  # id2index
 

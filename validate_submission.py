@@ -33,22 +33,22 @@ def get_evaluations_final(run_mf, qrel):
     return overall_res, indiv_res
 
 
-def read_run_file(run_file):  # 预测的结果
+def read_run_file(run_file):
     qret = {}
     df_qret = pd.read_csv(run_file, sep="\t")
     for row in df_qret.itertuples():
         cur_user_qret = qret.get(str(row.userId), {})
-        cur_user_qret[str(row.itemId)] = float(row.score)  # float
+        cur_user_qret[str(row.itemId)] = float(row.score)
         qret[str(row.userId)] = cur_user_qret
     return qret
 
 
-def read_qrel_file(qrel_file):   # 真实结果
+def read_qrel_file(qrel_file):
     qrel = {}
     df_qrel = pd.read_csv(qrel_file, sep="\t")
     for row in df_qrel.itertuples():
         cur_user_qrel = qrel.get(str(row.userId), {})
-        cur_user_qrel[str(row.itemId)] = int(row.rating)  # 结果都是1
+        cur_user_qrel[str(row.itemId)] = int(row.rating)
         qrel[str(row.userId)] = cur_user_qrel
     return qrel
 
@@ -106,9 +106,6 @@ def get_scores_for_market(input_dir, data_dir, market_name):
     my_valid_qrel = read_qrel_file(ref_path_val)
     task_ov_val, task_ind_val = get_evaluations_final(my_valid_run, my_valid_qrel)
 
-    
-    #print(task_ind_val)
-
     return task_ov_val
 
 
@@ -120,16 +117,10 @@ def main():
 
     extract_dir = './tmp/'
 
-    # scores = ['ndcg_cut_10', 'recall_10']
-
-    # score_names = {
-    #     'recall_10': {'val': 'r10_val', 'test': 'r10_test'},
-    #     'ndcg_cut_10': {'val': 'ndcg10_val', 'test': 'ndcg10_test'}
-    # }
-
-    scores = ['ndcg_cut_10',]
+    scores = ['ndcg_cut_10', 'recall_10']
 
     score_names = {
+        'recall_10': {'val': 'r10_val', 'test': 'r10_test'},
         'ndcg_cut_10': {'val': 'ndcg10_val', 'test': 'ndcg10_test'}
     }
 

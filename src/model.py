@@ -89,7 +89,7 @@ class Model(object):
                     train_targets = train_targets.to(self.args.device)
                 
                     opt.zero_grad()
-                    ratings_pred = self.model(train_user_ids, train_item_ids)
+                    ratings_pred = self.model(train_user_ids, train_item_ids,)
                     loss = loss_func(ratings_pred.view(-1), train_targets)
                     loss.backward()
                     opt.step()
@@ -119,7 +119,7 @@ class Model(object):
                 improve = ''
             msg = 'epoch: {0:>6}, total_loss: {1:>5.3}, dev_best_ndcg: {2:>5.5}{3}'
             print(msg.format(epoch, total_loss, dev_best_ndcg, improve))
-            if epoch-last_improve > 5:
+            if epoch-last_improve > self.config['patient']:
                 print("No optimization for a long time, auto-stopping...")
                 break
             
@@ -143,7 +143,7 @@ class Model(object):
             test_targets = test_targets.to(self.args.device)
 
             with torch.no_grad():
-                batch_scores = self.model(test_user_ids, test_item_ids)
+                batch_scores = self.model(test_user_ids, test_item_ids, drop_flag=False)
                 batch_scores = batch_scores.detach().cpu().numpy()
             # 使用numpy储存结果
             cur_result = pd.DataFrame(columns=['userId','itemId','rating'])
@@ -334,6 +334,8 @@ class NGCF(nn.Module):
     def init_weight(self):
         # xavier init
         initializer = nn.init.xavier_uniform_
+        # kaiming init
+        # initializer = nn.init.kaiming_uniform_
 
         # user,item的embedding
         embedding_dict = nn.ParameterDict({
@@ -392,24 +394,25 @@ class NGCF(nn.Module):
         all_embeddings = [ego_embeddings]
 
         for k in range(len(self.layers)):   # len(self.layers)层GNN
-            side_embeddings = torch.sparse.mm(A_hat, ego_embeddings)  # 邻接矩阵*特征矩阵
+            side_embeddings = torch.sparse.mm(A_hat, ego_embeddings)  # 邻接矩阵*特征矩阵,即做一次聚合
 
-            # transformed sum messages of neighbors.   聚合完后做一个仿射变换
+            # transformed sum messages of neighbors. 聚合完后做一个仿射变换
             sum_embeddings = torch.matmul(side_embeddings, self.weight_dict['W_gc_%d' % k]) \
                                              + self.weight_dict['b_gc_%d' % k]
+            
 
             # bi messages of neighbors.
-            # element-wise product
-            bi_embeddings = torch.mul(ego_embeddings, side_embeddings)  # 等于乘了两个ego_embeddings原始的feature
+            # element-wise product  bi-embedding在原论文中乘的拉普拉斯矩阵没有自连接
+            bi_embeddings = torch.mul(ego_embeddings, side_embeddings)
             # transformed bi messages of neighbors.
             bi_embeddings = torch.matmul(bi_embeddings, self.weight_dict['W_bi_%d' % k]) \
                                             + self.weight_dict['b_bi_%d' % k]
 
-            # non-linear activation.
+            # non-linear activation.  非线性变换
             ego_embeddings = nn.LeakyReLU(negative_slope=0.2)(sum_embeddings + bi_embeddings)
 
-            # message dropout.
-            ego_embeddings = nn.Dropout(self.mess_dropout[k])(ego_embeddings)
+            # message dropout.  预测时加no_grad会自动屏蔽掉message dropout
+            # ego_embeddings = nn.Dropout(self.mess_dropout[k])(ego_embeddings)
 
             # normalize the distribution of embeddings.
             norm_embeddings = F.normalize(ego_embeddings, p=2, dim=1)
@@ -427,12 +430,58 @@ class NGCF(nn.Module):
         """
         u_g_embeddings = u_g_embeddings[user_indices, :]  # 取出该batch的user_embedding
         i_g_embeddings = i_g_embeddings[item_indices, :]  # 取出该batch的item_embedding
-        rating = self.gmf(u_g_embeddings, i_g_embeddings)
+        gmf_rating = self.gmf(u_g_embeddings, i_g_embeddings)
+        # mlp_rating = self.mlp(u_g_embeddings, i_g_embeddings)
         # # cat到一起后接个线性层
         # emb = torch.cat([u_g_embeddings, i_g_embeddings], axis=1)
         # rating = self.logistic(self.linear(emb))
         
 
-        # return rating
+        return gmf_rating
+        # return 0.5*gmf_rating+0.5*mlp_rating
 
-        return rating
+
+# lightgbm
+class LightGCN(nn.Module):
+    def __init__(self, config, norm_adj):
+        super(LightGCN, self).__init__()
+
+        self.n_user = config['num_users']
+        self.n_item = config['num_items']
+        self.emb_size = config['latent_dim']
+        self.node_dropout = config['node_dropout'][0]
+        self.mess_dropout = config['mess_dropout']
+        self.device = config['device']
+
+        self.layers = config['layer_size']
+        
+        # Init the weight of user-item.
+        self.embedding_dict = self.init_weight()
+
+        # rating model  这块可以换成GMF或MLP
+        out_dim = self.emb_size
+        for size in self.layers:
+            out_dim += size
+
+        self.linear = torch.nn.Linear(out_dim*2, 1)
+        self.logistic = torch.nn.Sigmoid()
+        # gmf和mlp
+        config['latent_dim'] = out_dim
+        self.gmf = GMF(config)
+        self.mlp = MLP(config)
+
+        # Get sparse adj.
+        self.sparse_norm_adj = self._convert_sp_mat_to_sp_tensor(norm_adj).to(self.device)
+
+    def init_weight(self):
+        # xavier init
+        initializer = nn.init.xavier_uniform_
+        # user,item的embedding
+        embedding_dict = nn.ParameterDict({
+            'user_emb': nn.Parameter(initializer(torch.empty(self.n_user,
+                                                 self.emb_size))),
+            'item_emb': nn.Parameter(initializer(torch.empty(self.n_item,
+                                                 self.emb_size)))
+        })
+
+        return embedding_dict

@@ -1,5 +1,8 @@
 __pycache__
 baseline_outputs/sample_run/t1/*
 baseline_outputs/sample_run/t2/*
+baseline_outputs/mat_dir/t1/*
+baseline_outputs/mat_dir/t2/*
 baseline_outputs/*.zip
 checkpoints/*
+src/__pycache__
