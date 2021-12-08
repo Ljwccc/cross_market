@@ -6,3 +6,5 @@ baseline_outputs/mat_dir/t2/*
 baseline_outputs/*.zip
 checkpoints/*
 src/__pycache__
+transfer_data/*
+*.model
