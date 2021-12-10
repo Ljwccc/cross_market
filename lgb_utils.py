@@ -12,6 +12,9 @@ from tqdm import tqdm
 import os
 import gc
 
+import matplotlib.pyplot as plt
+import seaborn as sns
+
 import joblib
 import random
 
@@ -30,10 +33,17 @@ def get_static_feat(train, user_df, item_df):
     # 用户侧特征
     user_df['item_num'] = user_df['item_list'].apply(len)
     user_df['item_nuique_num'] = user_df['item_list'].apply(lambda x:len(set(x)))
+    user_df['item_nuique_ratio'] = user_df['item_nuique_num']/user_df['item_num']
 
+    # rating特征降分
+    # user_df['rating_mean_u'] = user_df['rating_list'].apply(np.mean)
+    # user_df['rating_std_u'] = user_df['rating_list'].apply(np.std)
     # 商品侧特征user
     item_df['user_num'] = item_df['user_list'].apply(len)
     item_df['user_nuique_num'] = item_df['user_list'].apply(lambda x:len(set(x)))
+    item_df['user_nuique_ratio'] = item_df['user_nuique_num']/item_df['user_num']
+    # item_df['rating_mean_i'] = item_df['rating_list'].apply(np.mean)
+    # item_df['rating_std_i'] = item_df['rating_list'].apply(np.std)
 
     # # 使用item/user交互过的user/item的特征序列的统计值代表item/user的特征
     user_df = user_df.drop(['item_list','rating_list'],axis=1)
@@ -71,13 +81,13 @@ def emb(df, f1, f2, tgt_market, mode='agg'):
     for i in range(len(sentences)):
         sentences[i] = [str(x) for x in sentences[i]]
 
-    if os.path.exists(f'./w2v_{tgt_market}.model'):
+    if os.path.exists(f'./w2v_dir/w2v_{tgt_market}.model'):
         print('find w2v model')
-        model = Word2Vec.load(f'./w2v_{tgt_market}.model')
+        model = Word2Vec.load(f'./w2v_dir/w2v_{tgt_market}.model')
     else:
         print('train w2v model')
         model = Word2Vec(sentences, size=emb_size, window=50, min_count=5, sg=0, hs=0, seed=1, iter=5, workers=8)
-        model.save(f'./w2v_{tgt_market}.model')
+        model.save(f'./w2v_dir/w2v_{tgt_market}.model')
     
     if mode=='agg':
         emb_matrix = []
@@ -134,7 +144,7 @@ def item_cf(df, user_col, item_col):  # train, 'itemId', 'userId'
 
 
 # 返回待预测item与当前用户交互过的item的相似度列表
-def get_sim_list(cf_data, sim_item_corr):  # 相似度矩阵, user交互的item列表, 用户id
+def get_sim_list(cf_data, sim_item_corr):  # 参数：用户访问过的列表，相似度矩阵
 
     userId = cf_data['userId']
     itemId = cf_data['itemId']
@@ -151,20 +161,77 @@ def get_sim_list(cf_data, sim_item_corr):  # 相似度矩阵, user交互的item�
 
     return sim_score_list         # 将预测的item与用户交互过的item的相似度列表返回
 
-def get_sim_feature(train, data_df):
+def get_sim_feature(train, data_df):  # data_df是最终用到的数据
     
-    sim_item_corr, user_item_list = item_cf(train.copy(), 'userId', 'itemId')  # 其实一共执行一次就行了
+    sim_item_corr, user_item_list = item_cf(train.copy(), 'userId', 'itemId')   # 获取相似度矩阵和user交互列表
 
     data_cf = data_df[['userId', 'itemId']]
-    data_cf = data_cf.merge(user_item_list.rename({'itemId':'itemId_list'},axis=1), on='userId', how='left')
-    data_cf['sim_list'] = data_cf.parallel_apply(lambda x:get_sim_list(x, sim_item_corr), axis=1)
+    data_cf = data_cf.merge(user_item_list.rename({'itemId':'itemId_list'},axis=1), on='userId', how='left')    
+    data_cf['sim_list'] = data_cf.parallel_apply(lambda x:get_sim_list(x, sim_item_corr), axis=1)    # 获取相似度列表
     data_cf['sim_mean'] = data_cf['sim_list'].parallel_apply(np.mean)
     data_cf['sim_max'] = data_cf['sim_list'].parallel_apply(np.max)
     data_cf['sim_min'] = data_cf['sim_list'].parallel_apply(np.min)
+    data_cf['sim_sum'] = data_cf['sim_list'].parallel_apply(np.sum)
 
     data_cf = data_cf.drop(['itemId_list', 'sim_list',],axis=1)
 
     return data_cf
+
+
+# 从source市场中获取item_cf特征
+def get_source_item_cf(train_t, train_s, data):
+    user_item_list = train_t.groupby('userId')['itemId'].agg(list).reset_index()
+    sim_item_corr_s, _ = item_cf(train_s.copy(), 'userId', 'itemId')
+    data = data[['userId', 'itemId']]
+    data = data.merge(user_item_list.rename({'itemId':'itemId_list'},axis=1), on='userId', how='left')    
+    data['sim_list_s'] = data.parallel_apply(lambda x:get_sim_list(x, sim_item_corr_s), axis=1)    # 获取相似度列表
+    data['sim_mean_s'] = data['sim_list_s'].parallel_apply(np.mean)
+    data['sim_max_s'] = data['sim_list_s'].parallel_apply(np.max)
+    data['sim_min_s'] = data['sim_list_s'].parallel_apply(np.min)
+
+    data = data.drop(['itemId_list', 'sim_list_s',],axis=1)
+    
+    return data
+
+
+# 获取tfidf特征
+# tfidf特征
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.decomposition import PCA
+from sklearn.decomposition import TruncatedSVD
+from sklearn.decomposition import NMF
+
+def get_tfidf(user_df, item_df, emb_size=32, deco_mode='svd'):
+    # user的tfidf特征
+    user_df['item_list_str'] = user_df['item_list'].apply(lambda x:' '.join(x))
+    tfidf = TfidfVectorizer(ngram_range=(1,1))
+    user_tfidf = tfidf.fit_transform(user_df['item_list_str'])
+    if deco_mode=='svd':
+        decom_algo = TruncatedSVD(n_components=emb_size, random_state=2021)
+    elif deco_mode=='pca':
+        decom_algo = PCA(n_components=emb_size) # 初始化PCA
+    else:
+        decom_algo = NMF(n_components=emb_size, random_state=2021)
+
+    user_tfidf = decom_algo.fit_transform(user_tfidf.toarray())
+    for i in range(emb_size):
+        user_df['user_tfidf_emb_{}'.format(i)] = user_tfidf[:, i]
+        
+    user_df = user_df.drop(['item_list_str', 'item_list', 'rating_list'],axis=1)
+
+
+    # item的tfidf特征
+    item_df['user_list_str'] = item_df['user_list'].apply(lambda x:' '.join(x))
+    tfidf = TfidfVectorizer(ngram_range=(1,1))
+    item_tfidf = tfidf.fit_transform(item_df['user_list_str'])
+    item_tfidf = decom_algo.fit_transform(item_tfidf.toarray())
+    for i in range(emb_size):
+        item_df['item_tfidf_emb_{}'.format(i)] = item_tfidf[:, i]
+
+
+    item_df = item_df.drop(['user_list_str', 'user_list', 'rating_list'],axis=1)
+
+    return user_df, item_df
 
 
 # lgb模型
@@ -223,3 +290,64 @@ def train_model_lgb(data_, test_, y_, folds_, cat_cols=None):
     data_['score'] = oof_preds  # 验证集结果
     
     return data_[['userId', 'itemId', 'score']], test_[['userId', 'itemId', 'score']], feature_importance_df
+
+
+# 特征重要性绘图
+def display_importances(feature_importance_df_):
+    # Plot feature importances
+    cols = feature_importance_df_[["feature", "importance"]].groupby("feature").mean().sort_values(
+        by="importance", ascending=False)[:50].index  # 只看前50个
+    
+    best_features = feature_importance_df_.loc[feature_importance_df_.feature.isin(cols)]
+    
+    plt.figure(figsize=(8,10))
+    sns.barplot(x="importance", y="feature", 
+                data=best_features.sort_values(by="importance", ascending=False))
+    plt.title('LightGBM Features (avg over folds)')
+    plt.tight_layout()
+    plt.savefig('lgbm_importances.png')
+
+
+# 热度填充
+def match_func(items1, items2):  # 所有候选项, run中的候选项
+    res = []
+    for it in items1:
+        if it in items2:
+            res.append(it)
+    if len(res) < 100:      # 如果不够100个，补齐，其实10个就完全够了
+        for it in items2:
+            if it not in res:
+                res.append(it)
+    return res[:100]
+
+def get_hot_reslut(vaild_qrel, pred_result, run_result, train):
+    vaild_pos = pred_result.merge(vaild_qrel, on=['userId', 'itemId'], how='left')
+    vaild_pos = vaild_pos.groupby("userId").agg(
+        score_list=("score", list),
+        rating_pos=("rating", list)  # 有rating代表预测的是这个位置
+    ).reset_index()
+
+    vaild_pos['true_pos'] = vaild_pos['rating_pos'].parallel_apply(lambda x:x.index(1.0)+1)  # 找到预测的位置
+    user_error = list(vaild_pos[vaild_pos['true_pos']>10]['userId'])                # 只用流行度填充预测出错的userid
+
+    # item热度，只取预测错误的userid
+
+    run_result['hot_itemIds'] = ','.join(train['itemId'].value_counts().reset_index()['index'].tolist())
+    run_result['hot_itemIds'] = run_result['hot_itemIds'].parallel_apply(lambda x:x.split(','))
+    run_result['itemIds'] = run_result['itemIds'].parallel_apply(lambda x:x.split(','))
+    run_result['result_itemIds'] = run_result.parallel_apply(lambda row:match_func(row['hot_itemIds'], row['itemIds']),axis = 1)
+    run_result = run_result[run_result['userId'].isin(user_error)]
+
+    userId = []
+    itemId = []
+    score = []
+    for index, row in run_result[['userId', 'result_itemIds']].iterrows():
+        userId += [row.userId]*len(row.result_itemIds)
+        itemId += row.result_itemIds
+        score += [(len(row.result_itemIds)-i)/len(row.result_itemIds) for i in range(len(row.result_itemIds))]
+    df = pd.DataFrame(columns=['userId','itemId','score'])
+    df['userId'] = userId
+    df['itemId'] = itemId
+    df['score'] = score
+
+    return df, user_error

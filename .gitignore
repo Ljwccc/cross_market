@@ -7,4 +7,5 @@ baseline_outputs/*.zip
 checkpoints/*
 src/__pycache__
 transfer_data/*
-*.model
+w2v_dir/*
+*.csv
