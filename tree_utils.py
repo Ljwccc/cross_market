@@ -4,6 +4,7 @@ from lightgbm import LGBMClassifier
 import numpy as np
 from sklearn.metrics import roc_auc_score, precision_recall_curve, roc_curve, average_precision_score, f1_score
 from sklearn.model_selection import KFold, StratifiedKFold
+from sklearn.neighbors import NearestNeighbors
 
 import math
 from collections import defaultdict
@@ -116,7 +117,13 @@ def emb(df, f1, f2, tgt_market, mode='agg'):
     
     return tmp
 
+def item_cf_with_rating(train):
+    train_pivot = train.pivot_table(index='itemId',columns='userId',values='rating',)  # aggfunc='count'
+    train_pivot = train_pivot.fillna(0)
 
+    knn = NearestNeighbors(metric='cosine', algorithm='brute')
+    knn.fit(train_pivot.values)
+    distances, indices = knn.kneighbors(train_pivot.values, n_neighbors=5)
 # item_CF特征，获取当前item与用于交互过的物品相似度的最大值，最小值，均值，方差等特征
 def item_cf(df, user_col, item_col):  # train, 'itemId', 'userId'
     user_item_ = df.groupby(user_col)[item_col].agg(list).reset_index()     # user的item列表
@@ -162,6 +169,8 @@ def get_sim_list(cf_data, sim_item_corr):  # 参数：用户访问过的列表�
     return sim_score_list         # 将预测的item与用户交互过的item的相似度列表返回
 
 def get_sim_feature(train, data_df):  # data_df是最终用到的数据
+
+    # train = train.groupby(['userId', 'itemId'], as_index=False)['rating'].agg('mean')  # 保证没有重复交互项
     
     sim_item_corr, user_item_list = item_cf(train.copy(), 'userId', 'itemId')   # 获取相似度矩阵和user交互列表
 
@@ -171,7 +180,7 @@ def get_sim_feature(train, data_df):  # data_df是最终用到的数据
     data_cf['sim_mean'] = data_cf['sim_list'].parallel_apply(np.mean)
     data_cf['sim_max'] = data_cf['sim_list'].parallel_apply(np.max)
     data_cf['sim_min'] = data_cf['sim_list'].parallel_apply(np.min)
-    data_cf['sim_sum'] = data_cf['sim_list'].parallel_apply(np.sum)
+    # data_cf['sim_sum'] = data_cf['sim_list'].parallel_apply(np.sum)
 
     data_cf = data_cf.drop(['itemId_list', 'sim_list',],axis=1)
 
@@ -236,27 +245,42 @@ def get_tfidf(user_df, item_df, emb_size=32, deco_mode='svd'):
 
 # lgb模型
 useless_cols = ['userId','itemId','label']
-def train_model_lgb(data_, test_, y_, folds_, cat_cols=None):
+def train_model_lgb(data_, test_, y_, folds_, cat_cols=None, semi_data_=None):
     oof_preds = np.zeros(data_.shape[0])       # 验证集预测结果
     sub_preds = np.zeros(test_.shape[0])       # 测试集预测结果
     feature_importance_df = pd.DataFrame()
     feats = [f for f in data_.columns if f not in useless_cols]
    
-    
+    # 半监督每批训练数据
+    if not semi_data_ is None:
+        print('use semi_data')
+        semi_data_ = semi_data_.sample(frac=1, random_state=2021)
+        semi_num = semi_data_.shape[0]/folds_.n_splits
+        semi_y = semi_data_['label']
+
+
     for n_fold, (trn_idx, val_idx) in enumerate(folds_.split(data_, y_)):
         
-        trn_x, trn_y = data_[feats].iloc[trn_idx], y_.iloc[trn_idx]   # 训练集数据
+        if not semi_data_ is None:
+            semi_data_batch = semi_data_[feats].iloc[int(n_fold*semi_num):int((n_fold+1)*semi_num)]
+            semi_y_batch = semi_y.iloc[int(n_fold*semi_num):int((n_fold+1)*semi_num)]
+        
+            trn_x, trn_y = pd.concat([data_[feats].iloc[trn_idx],semi_data_batch]), pd.concat([y_.iloc[trn_idx],semi_y_batch])
+        else:
+            trn_x, trn_y = data_[feats].iloc[trn_idx], y_.iloc[trn_idx]   # 训练集数据
+
+        # trn_x, trn_y = data_[feats].iloc[trn_idx], y_.iloc[trn_idx]   # 训练集数据
         val_x, val_y = data_[feats].iloc[val_idx], y_.iloc[val_idx]   # 验证集数据
        
         clf = LGBMClassifier(
             n_estimators=4000,   # 4000
             learning_rate=0.08,  # 0.08 
-            num_leaves=2**5,
+            num_leaves=2**5,      # 2^5
             colsample_bytree=0.8, # 0.8
             subsample=0.9,        # 0.9
             max_depth=5, 
-            reg_alpha=.3,    # 0.3
-            reg_lambda=.3,   # 0.3
+            reg_alpha=0.3,    # 0.3
+            reg_lambda=0.3,   # 0.3
             min_split_gain=.01,
             min_child_weight=2,
             silent=-1,
