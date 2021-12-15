@@ -106,9 +106,9 @@ class MetaMarket_Dataset(object):
       1: de_market_gen,
       ...
     }
-    task_gen_dict：
-    0：表示测试数据，包含交互的表和负样本列表
-    1：训练数据，包含交互的表和负样本列表
+    task_gen_dict:
+    0:表示测试数据，包含交互的表和负样本列表
+    1:训练数据，包含交互的表和负样本列表
     """
     def __init__(self, task_gen_dict, num_negatives=4, meta_split='train'):
         self.num_tasks = len(task_gen_dict)

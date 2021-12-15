@@ -1,9 +1,6 @@
 import pandas as pd
 # import optuna.integration.lightgbm as lgb  # 调参用
-from lightgbm import LGBMClassifier
-import numpy as np
-from sklearn.metrics import roc_auc_score, precision_recall_curve, roc_curve, average_precision_score, f1_score
-from sklearn.model_selection import KFold, StratifiedKFold
+
 from sklearn.neighbors import NearestNeighbors
 
 import math
@@ -12,9 +9,7 @@ from gensim.models import Word2Vec
 from tqdm import tqdm
 import os
 import gc
-
-import matplotlib.pyplot as plt
-import seaborn as sns
+import numpy as np
 
 import joblib
 import random
@@ -117,13 +112,80 @@ def emb(df, f1, f2, tgt_market, mode='agg'):
     
     return tmp
 
-def item_cf_with_rating(train):
-    train_pivot = train.pivot_table(index='itemId',columns='userId',values='rating',)  # aggfunc='count'
-    train_pivot = train_pivot.fillna(0)
 
-    knn = NearestNeighbors(metric='cosine', algorithm='brute')
+# item字典映射
+class ITEM_ID_Bank(object):
+    """
+    Central for all cross-market user and items original id and their corrosponding index values
+    """
+    def __init__(self):
+        self.item_id_index = {}
+        self.last_item_index = 0
+    
+    def query_item_index(self, item_id):           # item_id字典映射
+        if item_id not in self.item_id_index:
+            self.item_id_index[item_id] = self.last_item_index
+            self.last_item_index += 1
+        return self.item_id_index[item_id]
+
+    def query_item_id(self, item_index):
+        item_index_id = {v:k for k, v in self.item_id_index.items()}
+        if item_index in item_index_id:
+            return item_index_id[item_index]
+        else:
+            print(f'ITEM index {item_index} is not valid!')
+            return 'yyyyy'
+
+def get_sim_with_rate_list(user_item_list_cf, distances, indices, item_bank):
+
+    itemId = user_item_list_cf['itemId']  # 当前交互的item
+    interacted_items = user_item_list_cf['itemId_list']   # 交互过的item列表
+    sim_score_list = []
+
+    cur_item_index = item_bank.query_item_index(itemId)
+
+    for item in interacted_items:
+        item_index = item_bank.query_item_index(item)
+
+        # 1、从indices中找到cur_item_index对应的行 i   2、从indices找到item_index对应的列的位置j    3、使用i,j从distances中找到对应的相似度
+        try:  
+            j = list(indices[cur_item_index]).index(item_index)
+            sim_score_list.append(distances[cur_item_index][j])
+        except:
+            sim_score_list.append(0)
+    
+    return sim_score_list
+                                                            
+
+def item_cf_with_rating(train, data_df):  # data_df用于训练的数据
+
+    user_item_list = train.groupby('userId')['itemId'].agg(list).reset_index()     # user的item列表
+
+    train_pivot = train.groupby(['userId', 'itemId'], as_index=False)['rating'].agg(np.mean)         # 改为只有一次交互
+    train_pivot = train_pivot.pivot_table(index='itemId',columns='userId',values='rating',)  # aggfunc='count'
+    train_pivot = train_pivot.fillna(0)
+    print('train_pivot shape:', train_pivot.shape)
+
+    knn = NearestNeighbors(metric='cosine', algorithm='brute', n_jobs=8)
     knn.fit(train_pivot.values)
-    distances, indices = knn.kneighbors(train_pivot.values, n_neighbors=5)
+    distances, indices = knn.kneighbors(train_pivot.values, n_neighbors=50)
+
+    item_id = train_pivot.reset_index()['itemId']
+    item_bank = ITEM_ID_Bank()
+    item_id.apply(lambda x:item_bank.query_item_index(x))  # 获取字典映射
+
+    data_df = data_df[['userId', 'itemId']]
+    data_df = data_df.merge(user_item_list.rename({'itemId':'itemId_list'},axis=1), on='userId', how='left')  # 合并用户交互过的列表
+    
+    data_df['sim_list'] = data_df.parallel_apply(lambda x:get_sim_with_rate_list(x, distances, indices, item_bank), axis=1)
+    data_df['sim_mean_rating'] = data_df['sim_list'].parallel_apply(np.mean)
+    data_df['sim_max_rating'] = data_df['sim_list'].parallel_apply(np.max)
+    data_df['sim_min_rating'] = data_df['sim_list'].parallel_apply(np.min)
+
+    data_df = data_df.drop(['itemId_list', 'sim_list',],axis=1)
+
+    return data_df
+
 # item_CF特征，获取当前item与用于交互过的物品相似度的最大值，最小值，均值，方差等特征
 def item_cf(df, user_col, item_col):  # train, 'itemId', 'userId'
     user_item_ = df.groupby(user_col)[item_col].agg(list).reset_index()     # user的item列表
@@ -151,11 +213,11 @@ def item_cf(df, user_col, item_col):  # train, 'itemId', 'userId'
 
 
 # 返回待预测item与当前用户交互过的item的相似度列表
-def get_sim_list(cf_data, sim_item_corr):  # 参数：用户访问过的列表，相似度矩阵
+def get_sim_list(user_item_list_cf, sim_item_corr):  # 参数：用户访问过的列表，相似度矩阵
 
-    userId = cf_data['userId']
-    itemId = cf_data['itemId']
-    interacted_items = cf_data['itemId_list']   # 可能为空
+    userId = user_item_list_cf['userId']
+    itemId = user_item_list_cf['itemId']
+    interacted_items = user_item_list_cf['itemId_list']   # 可能为空
     sim_score_list = []
     try:
         for i in interacted_items:
@@ -172,15 +234,15 @@ def get_sim_feature(train, data_df):  # data_df是最终用到的数据
 
     # train = train.groupby(['userId', 'itemId'], as_index=False)['rating'].agg('mean')  # 保证没有重复交互项
     
-    sim_item_corr, user_item_list = item_cf(train.copy(), 'userId', 'itemId')   # 获取相似度矩阵和user交互列表
+    sim_item_corr, user_item_list = item_cf(train.copy(), 'userId', 'itemId')   # 获取相似度矩阵和user交互列表  user_item_list中包含了userid的重复项
 
     data_cf = data_df[['userId', 'itemId']]
-    data_cf = data_cf.merge(user_item_list.rename({'itemId':'itemId_list'},axis=1), on='userId', how='left')    
+    data_cf = data_cf.merge(user_item_list.rename({'itemId':'itemId_list'},axis=1), on='userId', how='left')     #  
     data_cf['sim_list'] = data_cf.parallel_apply(lambda x:get_sim_list(x, sim_item_corr), axis=1)    # 获取相似度列表
     data_cf['sim_mean'] = data_cf['sim_list'].parallel_apply(np.mean)
     data_cf['sim_max'] = data_cf['sim_list'].parallel_apply(np.max)
     data_cf['sim_min'] = data_cf['sim_list'].parallel_apply(np.min)
-    # data_cf['sim_sum'] = data_cf['sim_list'].parallel_apply(np.sum)
+
 
     data_cf = data_cf.drop(['itemId_list', 'sim_list',],axis=1)
 
@@ -243,95 +305,6 @@ def get_tfidf(user_df, item_df, emb_size=32, deco_mode='svd'):
     return user_df, item_df
 
 
-# lgb模型
-useless_cols = ['userId','itemId','label']
-def train_model_lgb(data_, test_, y_, folds_, cat_cols=None, semi_data_=None):
-    oof_preds = np.zeros(data_.shape[0])       # 验证集预测结果
-    sub_preds = np.zeros(test_.shape[0])       # 测试集预测结果
-    feature_importance_df = pd.DataFrame()
-    feats = [f for f in data_.columns if f not in useless_cols]
-   
-    # 半监督每批训练数据
-    if not semi_data_ is None:
-        print('use semi_data')
-        semi_data_ = semi_data_.sample(frac=1, random_state=2021)
-        semi_num = semi_data_.shape[0]/folds_.n_splits
-        semi_y = semi_data_['label']
-
-
-    for n_fold, (trn_idx, val_idx) in enumerate(folds_.split(data_, y_)):
-        
-        if not semi_data_ is None:
-            semi_data_batch = semi_data_[feats].iloc[int(n_fold*semi_num):int((n_fold+1)*semi_num)]
-            semi_y_batch = semi_y.iloc[int(n_fold*semi_num):int((n_fold+1)*semi_num)]
-        
-            trn_x, trn_y = pd.concat([data_[feats].iloc[trn_idx],semi_data_batch]), pd.concat([y_.iloc[trn_idx],semi_y_batch])
-        else:
-            trn_x, trn_y = data_[feats].iloc[trn_idx], y_.iloc[trn_idx]   # 训练集数据
-
-        # trn_x, trn_y = data_[feats].iloc[trn_idx], y_.iloc[trn_idx]   # 训练集数据
-        val_x, val_y = data_[feats].iloc[val_idx], y_.iloc[val_idx]   # 验证集数据
-       
-        clf = LGBMClassifier(
-            n_estimators=4000,   # 4000
-            learning_rate=0.08,  # 0.08 
-            num_leaves=2**5,      # 2^5
-            colsample_bytree=0.8, # 0.8
-            subsample=0.9,        # 0.9
-            max_depth=5, 
-            reg_alpha=0.3,    # 0.3
-            reg_lambda=0.3,   # 0.3
-            min_split_gain=.01,
-            min_child_weight=2,
-            silent=-1,
-            verbose=-1,
-            n_jobs=8,
-        )
-        
-        clf.fit(trn_x, trn_y, 
-                eval_set= [(trn_x, trn_y), (val_x, val_y)], 
-                eval_metric='auc', verbose=300, early_stopping_rounds=100,  # 这个参数有点小，可以再大一点
-                # categorical_feature = cat_cols
-               )
-        oof_preds[val_idx] = clf.predict_proba(val_x, num_iteration=clf.best_iteration_)[:, 1]   # 验证集结果
-        
-        
-        sub_preds += clf.predict_proba(test_[feats], num_iteration=clf.best_iteration_)[:, 1] / folds_.n_splits  # 测试集结果
-        
-        fold_importance_df = pd.DataFrame()
-        fold_importance_df["feature"] = feats
-        fold_importance_df["importance"] = clf.feature_importances_
-        fold_importance_df["fold"] = n_fold + 1
-        feature_importance_df = pd.concat([feature_importance_df, fold_importance_df], axis=0)
-        
-        print('Fold %2d AUC : %.6f' % (n_fold + 1, roc_auc_score(val_y, oof_preds[val_idx])))
-        del clf, trn_x, trn_y, val_x, val_y
-        gc.collect()
-    
-    print('=====Full AUC score %.6f=====' % roc_auc_score(y_, oof_preds))
-    
-    test_['score'] = sub_preds
-    data_['score'] = oof_preds  # 验证集结果
-    
-    return data_[['userId', 'itemId', 'score']], test_[['userId', 'itemId', 'score']], feature_importance_df
-
-
-# 特征重要性绘图
-def display_importances(feature_importance_df_):
-    # Plot feature importances
-    cols = feature_importance_df_[["feature", "importance"]].groupby("feature").mean().sort_values(
-        by="importance", ascending=False)[:50].index  # 只看前50个
-    
-    best_features = feature_importance_df_.loc[feature_importance_df_.feature.isin(cols)]
-    
-    plt.figure(figsize=(8,10))
-    sns.barplot(x="importance", y="feature", 
-                data=best_features.sort_values(by="importance", ascending=False))
-    plt.title('LightGBM Features (avg over folds)')
-    plt.tight_layout()
-    plt.savefig('lgbm_importances.png')
-
-
 # 热度填充
 def match_func(items1, items2):  # 所有候选项, run中的候选项
     res = []
@@ -375,3 +348,42 @@ def get_hot_reslut(vaild_qrel, pred_result, run_result, train):
     df['score'] = score
 
     return df, user_error
+
+
+# 获取每个用户所有的负样本
+def _sample_negative(all_data):
+
+    item_pool = set(all_data['itemId'].unique())
+    by_userid_group = all_data.groupby("userId")['itemId']
+    negatives_train = {}
+    for userid, group_frame in by_userid_group:
+        pos_itemids = set(group_frame.values.tolist())  # 交互过的都是正样本
+        neg_itemids = item_pool - pos_itemids      # 没有交互过的都是负样本
+        neg_itemids_train = neg_itemids
+        negatives_train[userid] = neg_itemids_train
+    return negatives_train
+
+def instance_expand_data(expand_data, all_data):
+
+    negatives_data = _sample_negative(all_data)  # 获取每个用户的负样本
+     
+    users, items, ratings = [], [], []
+    train_ratings = expand_data  # 交互的表
+    for row in train_ratings.itertuples():  # 一个正样本，num_negatives个负样本
+        users.append(row.userId)
+        items.append(row.itemId)
+        ratings.append(float(1))
+
+        cur_negs = negatives_data[row.userId]                        # 当前用户的负样本
+        cur_negs = random.sample(cur_negs, min(99, len(cur_negs)))  # 随机抽100个负样本
+        for neg in cur_negs:
+            users.append(row.userId)
+            items.append(neg)
+            ratings.append(float(0))  # negative samples get 0 rating
+
+    expand_df = pd.DataFrame(columns=['userId', 'itemId', 'label'])
+    expand_df['userId'] = users
+    expand_df['itemId'] = items
+    expand_df['label'] = ratings
+
+    return expand_df

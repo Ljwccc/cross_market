@@ -11,7 +11,7 @@ import gc
 
 import pandas as pd
 
-useless_cols = ['userId','itemId','label']
+useless_cols = ['userId','itemId','label','is_expand']
 # lgb模型
 def train_model_lgb(data_, test_, y_, folds_, cat_cols=None, semi_data_=None):
     oof_preds = np.zeros(data_.shape[0])       # 验证集预测结果
@@ -84,7 +84,7 @@ def train_model_lgb(data_, test_, y_, folds_, cat_cols=None, semi_data_=None):
     return data_[['userId', 'itemId', 'score']], test_[['userId', 'itemId', 'score']], feature_importance_df
 
 # catboost模型
-def train_model_cat(data_, test_, y_, folds_, cat_cols, semi_data_=None):
+def train_model_cat(data_, test_, y_, folds_, cat_cols=None, semi_data_=None):
     oof_preds = np.zeros(data_.shape[0])  # 验证集预测结果
     sub_preds = np.zeros(test_.shape[0])  # 测试集预测结果
     feature_importance_df = pd.DataFrame()
@@ -95,7 +95,7 @@ def train_model_cat(data_, test_, y_, folds_, cat_cols, semi_data_=None):
         semi_num = semi_data_.shape[0]/folds_.n_splits
         semi_y = semi_data_['label']
 
-    for n_fold, (trn_idx, val_idx) in enumerate(folds_.split(data_)):
+    for n_fold, (trn_idx, val_idx) in enumerate(folds_.split(data_, y_)):
         
         if not semi_data_ is None:
             semi_data_batch = semi_data_[feats].iloc[int(n_fold*semi_num):int((n_fold+1)*semi_num)]
@@ -143,18 +143,18 @@ def train_model_cat(data_, test_, y_, folds_, cat_cols, semi_data_=None):
         
     print('=====Full AUC score %.6f=====' % roc_auc_score(y_, oof_preds))
     
-    test_['label'] = sub_preds
+    test_['score'] = sub_preds
     data_['score'] = oof_preds  # 验证集结果
 
     return data_[['userId', 'itemId', 'score']], test_[['userId', 'itemId', 'score']], feature_importance_df
 
 # xgboost模型
-def train_model_xgb(data_, test_, y_, folds_, cat_cols, semi_data_=None):
+def train_model_xgb(data_, test_, y_, folds_, cat_cols=None, semi_data_=None):
     oof_preds = np.zeros(data_.shape[0])  # 验证集预测结果
     sub_preds = np.zeros(test_.shape[0])  # 测试集预测结果
     feature_importance_df = pd.DataFrame()
     feats = [f for f in data_.columns if f not in useless_cols]
-    for n_fold, (trn_idx, val_idx) in enumerate(folds_.split(data_)):
+    for n_fold, (trn_idx, val_idx) in enumerate(folds_.split(data_, y_)):
         trn_x, trn_y = data_[feats].iloc[trn_idx], y_.iloc[trn_idx]   # 训练集数据
         val_x, val_y = data_[feats].iloc[val_idx], y_.iloc[val_idx]   # 验证集数据
        
@@ -192,11 +192,13 @@ def train_model_xgb(data_, test_, y_, folds_, cat_cols, semi_data_=None):
         gc.collect()
     
     print('=====Full AUC score %.6f=====' % roc_auc_score(y_, oof_preds))
-    
-    test_['label'] = sub_preds
+
+    test_['score'] = sub_preds
     data_['score'] = oof_preds  # 验证集结果
 
-    return oof_preds, test_[['user', 'label']], feature_importance_df
+    return data_[['userId', 'itemId', 'score']], test_[['userId', 'itemId', 'score']], feature_importance_df
+
+    
 # 特征重要性绘图
 def display_importances(feature_importance_df_):
     # Plot feature importances
